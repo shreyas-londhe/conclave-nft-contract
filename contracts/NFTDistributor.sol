@@ -2,15 +2,17 @@
 
 pragma solidity ^0.8.10;
 
+import "hardhat/console.sol";
+
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract Buildspace is ERC721URIStorage, Ownable {
-    mapping(address => mapping(string => uint256)) public claimed;
-    mapping(address => bool) private admins;
-    mapping(string => Cohort) public cohorts;
+contract NFTDistributor is ERC721URIStorage, Ownable {
+    mapping(address => mapping(string => uint256)) public claimed; // personAddr => cohortId => numberOfNFTs
+    mapping(address => bool) private admins; // personAddr => isAdmin
+    mapping(string => Cohort) public cohorts; // cohortId => Cohort
 
     using Counters for Counters.Counter;
     Counters.Counter private _tokenIdTracker;
@@ -21,10 +23,9 @@ contract Buildspace is ERC721URIStorage, Ownable {
     struct Cohort {
         uint128 limit;
         uint128 tokenMinted;
-        bytes32 merkleRoot;
     }
 
-    event Claim(
+    event NFTClaimed(
         address indexed _receiver,
         string indexed _cohortId,
         uint128 _cohortIndex,
@@ -36,8 +37,7 @@ contract Buildspace is ERC721URIStorage, Ownable {
         string memory _contractBaseURI,
         string[] memory _cohortIds,
         uint128[] memory _limits,
-        uint128[] memory _tokenMints,
-        bytes32[] memory _merkleRoots
+        uint128[] memory _tokenMints
     ) ERC721("ConclaveX", "CONX") {
         admins[msg.sender] = true;
         contractBaseURI = _contractBaseURI;
@@ -45,11 +45,7 @@ contract Buildspace is ERC721URIStorage, Ownable {
         // Initialize cohorts
         for (uint256 i = 0; i < _limits.length; i++) {
             cohorts[_cohortIds[i]] = (
-                Cohort({
-                    limit: _limits[i],
-                    tokenMinted: _tokenMints[i],
-                    merkleRoot: _merkleRoots[i]
-                })
+                Cohort({ limit: _limits[i], tokenMinted: _tokenMints[i] })
             );
         }
     }
@@ -74,24 +70,11 @@ contract Buildspace is ERC721URIStorage, Ownable {
         _;
     }
 
-    modifier merkleCheck(
-        string memory _cohortId,
-        bytes32[] memory _proof,
-        address to
-    ) {
-        bytes32 leaf = keccak256(abi.encodePacked(to));
-        require(
-            MerkleProof.verify(_proof, cohorts[_cohortId].merkleRoot, leaf),
-            "ConclaveX: address not eligible for claim"
-        );
-        _;
-    }
-
     function _baseURI() internal view virtual override returns (string memory) {
         return contractBaseURI;
     }
 
-    function issueToken(
+    function _issueToken(
         string memory _cohortId,
         address to,
         bool _isAdmin
@@ -106,16 +89,23 @@ contract Buildspace is ERC721URIStorage, Ownable {
             )
         );
 
+        _tokenIdTracker.increment();
         uint256 newTokenId = _tokenIdTracker.current();
         claimed[to][_cohortId] = newTokenId;
 
         _safeMint(to, newTokenId);
-        emit Claim(to, _cohortId, nextCohortTokenIndex, newTokenId, _isAdmin);
 
         _setTokenURI(newTokenId, _uri);
 
         cohorts[_cohortId].tokenMinted = nextCohortTokenIndex + 1;
-        _tokenIdTracker.increment();
+
+        emit NFTClaimed(
+            to,
+            _cohortId,
+            nextCohortTokenIndex,
+            newTokenId,
+            _isAdmin
+        );
 
         return newTokenId;
     }
@@ -141,57 +131,29 @@ contract Buildspace is ERC721URIStorage, Ownable {
         return str;
     }
 
-    function adminClaimToken(
-        string memory _cohortId,
-        bytes32[] memory _proof,
-        address to
-    ) external onlyAdmin merkleCheck(_cohortId, _proof, to) returns (uint256) {
-        return issueToken(_cohortId, to, true);
-    }
-
-    // To be used by users to claim token on their own behalf.
-    function claimToken(string memory _cohortId, bytes32[] memory _proof)
+    function adminClaimToken(string memory _cohortId, address to)
         external
-        merkleCheck(_cohortId, _proof, msg.sender)
+        onlyAdmin
         returns (uint256)
     {
-        bytes32 leaf = keccak256(abi.encodePacked(msg.sender));
-        require(
-            MerkleProof.verify(_proof, cohorts[_cohortId].merkleRoot, leaf),
-            "ConclaveX: address not eligible for claim"
-        );
-
-        return issueToken(_cohortId, msg.sender, false);
+        return _issueToken(_cohortId, to, true);
     }
 
     function setAllowsTransfers(bool _allowsTransfers) external onlyAdmin {
         allowsTransfers = _allowsTransfers;
     }
 
-    function createCohort(
-        string memory _cohortId,
-        uint128 _limit,
-        bytes32 _merkleRoot
-    ) external onlyAdmin {
+    function createCohort(string memory _cohortId, uint128 _limit)
+        external
+        onlyAdmin
+    {
         require(
             cohorts[_cohortId].limit == 0,
             "ConclaveX: Cohort already exists"
         );
         require(_limit > 0, "ConclaveX: Limit must be greater than 0");
-        Cohort memory cohort = Cohort({
-            limit: _limit,
-            tokenMinted: 0,
-            merkleRoot: _merkleRoot
-        });
+        Cohort memory cohort = Cohort({ limit: _limit, tokenMinted: 0 });
         cohorts[_cohortId] = cohort;
-    }
-
-    function setMerkleRoot(string memory _cohortId, bytes32 _merkleRoot)
-        external
-        onlyAdmin
-    {
-        require(cohorts[_cohortId].limit > 0, "ConclaveX: No cohort limit set");
-        cohorts[_cohortId].merkleRoot = _merkleRoot;
     }
 
     function updateAdmin(address _admin, bool isAdmin) external onlyOwner {
